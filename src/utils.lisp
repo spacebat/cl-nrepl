@@ -5,7 +5,8 @@
 
 (defun make-map (&rest keyvals)
   "Create an fset map of the given riffle of keys and values."
-  (fset:convert 'fset:map (subdivide keyvals 2)))
+  (fset:convert 'fset:map (loop :for (k v) :on keyvals :by #'cddr
+                                :collect (cons k v))))
 
 (defun with-when (map &rest keyvals)
   "Add the items in the `keyvals` riffle with non-nil values to `map`."
