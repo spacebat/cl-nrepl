@@ -275,11 +275,14 @@
 (test interrupt-id-mismatch
   (with-connection (c)
     (let* ((s (clone c))
+           ;; Block on stdin rather than sleeping, so the eval is certainly
+           ;; still running when the interrupt arrives, however slow things are.
            (e (send-message c "op" "eval" "session" s
-                            "code" "(progn (print :started) (finish-output) (sleep 0.5) :finished)")))
-      (responses-until-output c e)
+                            "code" "(progn (read-line) :finished)")))
+      (responses-until c e "need-input")
       (let ((i (send c "op" "interrupt" "session" s "interrupt-id" "not-it")))
         (is (has-status "interrupt-id-mismatch" i)))
+      (send c "op" "stdin" "session" s "stdin" (format nil "go~%"))
       (is (equal ":FINISHED" (value (responses c e)))))))
 
 (test interrupt-ephemeral-session

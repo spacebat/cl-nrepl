@@ -24,7 +24,7 @@ CLASSPATH=$(echo "$CACHE"/*.jar | tr ' ' :)
 # Start the server on a free port and wait for it to tell us which.
 PORT_FILE=$(mktemp)
 trap 'kill $SERVER 2>/dev/null; rm -f "$PORT_FILE"' EXIT
-sbcl --noinform --non-interactive \
+sbcl --dynamic-space-size 4096 --noinform --non-interactive \
      --load "$QUICKLISP_SETUP" \
      --eval '(ql:quickload :nrepl :silent t)' \
      --eval "(with-open-file (f \"$PORT_FILE\" :direction :output :if-exists :supersede)
