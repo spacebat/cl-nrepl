@@ -26,3 +26,27 @@ jobs:
                --load ~/quicklisp/setup.lisp \
                --eval '(ql:quickload :nrepl/test)' \
                --eval '(asdf:test-system :nrepl)'
+
+  conformance:
+    # Drive the server with the official Clojure nREPL client.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install SBCL
+        run: sudo apt-get update && sudo apt-get install -y sbcl
+
+      - name: Install Quicklisp
+        run: |
+          curl -sSO https://beta.quicklisp.org/quicklisp.lisp
+          sbcl --non-interactive --load quicklisp.lisp \
+               --eval '(quicklisp-quickstart:install)'
+          ln -s "$GITHUB_WORKSPACE" ~/quicklisp/local-projects/nrepl
+
+      - name: Run conformance tests
+        run: test/conformance/run.sh
