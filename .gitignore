@@ -1,0 +1,8 @@
+.DS_Store
+*.swp
+*.swo
+*.un~
+tags
+scratch.lisp
+*.fasl
+__pycache__/
