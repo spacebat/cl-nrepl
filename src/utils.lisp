@@ -20,18 +20,14 @@
                         remaining)))))
     (build map keyvals)))
 
-(defun read-all-from-string (s)
-  "Read all forms in `s` and return them as a list."
-  (labels ((read-next-from-string (s results)
-             (if (equal (string-trim " " s) "")
-               results
-               (multiple-value-bind (i pos) (read-from-string s)
-                 (read-next-from-string (subseq s pos) (cons i results))))))
-    (nreverse (read-next-from-string s ()))))
-
 (defun random-uuid ()
   "Return a random UUID as a string."
   (format nil "~a" (uuid:make-v4-uuid)))
+
+(defun safe-princ (object)
+  "Return `object` printed with `princ`, without ever signaling."
+  (handler-case (princ-to-string object)
+    (error () (format nil "#<~S>" (type-of object)))))
 
 (defun log-message (&rest args)
   (apply #'format *log* args)
@@ -48,12 +44,6 @@
            (with-when response
              "id" (fset:lookup message "id")
              "session" (fset:lookup message "session"))))
-
-
-(defun parse-in-package (in-package)
-  (if (or (null in-package) (string= in-package ""))
-    *package*
-    (or (find-package (read-from-string in-package)) *package*)))
 
 
 (defmacro when-found ((var lookup-expr) &body body)

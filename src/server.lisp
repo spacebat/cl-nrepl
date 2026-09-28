@@ -49,18 +49,36 @@
     (log-message "; ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^~%"))
   (funcall (build-handler #'handle-base (middleware)) message))
 
-(defun handle-message (socket-stream lock)
-  "Read and handle a single message from `socket-stream`."
-  (let ((message (fset:with (read-object socket-stream)
-                   "transport" (curry #'write-object socket-stream lock))))
-    (handle message)))
+(defun handle-message (message)
+  "Handle `message`, responding with an error instead of signaling one.
+
+  An error escaping here would take down the whole connection (or, with the
+  debugger enabled, hang it), so report it to the client instead.
+
+  "
+  (handler-case (handle message)
+    (serious-condition (c)
+      (log-message "~%; Error handling message: ~A~%" c)
+      (ignore-errors
+        (respond message
+                 (make-map "status" '("error")
+                           "error" (safe-princ c)))))))
 
 (defun handler (socket-stream lock)
   "Read a series of messages from `socket-stream`, handling each."
-  (log-message "Client connected...")
-  (handler-case (loop (handle-message socket-stream lock))
-    (end-of-file () nil))
-  (log-message "Client disconnected..."))
+  (log-message "Client connected...~%")
+  (loop
+    (let ((message (handler-case (read-object socket-stream)
+                     (end-of-file () (return))
+                     (error (e)
+                       ;; The stream is in an unknown state after a failed
+                       ;; read, so there's no sensible way to continue.
+                       (log-message "~%; Error reading message: ~A~%" e)
+                       (return)))))
+      (handle-message
+        (fset:with message "transport"
+                   (curry #'write-object socket-stream lock)))))
+  (log-message "Client disconnected...~%"))
 
 
 ;;;; Server
@@ -96,7 +114,12 @@
           (usocket:socket-close client-socket))))))
 
 (defun start-server (&key (address "127.0.0.1") (port 8675))
-  "Fire up a server thread that will listen for connections."
+  "Fire up a server thread that will listen for connections.
+
+  Returns the server thread and the port actually listened on (useful when
+  `port` is 0, which asks the OS for a free port).
+
+  "
   (log-message "Starting server...~%")
   (let ((socket (usocket:socket-listen
                   address port
@@ -104,17 +127,21 @@
                   ;; have to specify element-type here too because usocket+CCL
                   ;; fucks it up if you only specify it in socket-accept
                   :element-type '(unsigned-byte 8))))
-    (setf *server-thread*
-          (run-in-thread (format nil "NREPL Server (~a/~a)" address port)
-            (unwind-protect
-                (accept-connections socket)
-              (log-message "Closing server socket...~%")
-              (usocket:socket-close socket))))))
+    (let ((port (usocket:get-local-port socket)))
+      (values (setf *server-thread*
+                    (run-in-thread (format nil "NREPL Server (~a/~a)" address port)
+                      (unwind-protect
+                          (accept-connections socket)
+                        (log-message "Closing server socket...~%")
+                        (usocket:socket-close socket))))
+              port))))
 
 (defun stop-server ()
-  "Kill the server thread, if it exists."
+  "Kill the server thread, if it exists, and wait for it to finish."
   (let ((s (shiftf *server-thread* nil)))
     (when s
       (log-message "Stopping server...~%")
-      (bt:destroy-thread s))))
+      (when (bt:thread-alive-p s)
+        (bt:destroy-thread s)
+        (ignore-errors (bt:join-thread s))))))
 

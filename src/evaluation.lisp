@@ -13,54 +13,29 @@
    (standard-error :initarg :err :reader err)))
 
 
-(defun read-data (stream)
-  (flex:octets-to-string
-    (flex:get-output-stream-sequence stream)
-    :external-format :utf-8))
+(defun read-next-form (stream)
+  "Read the next form from `stream`, returning `(values form t)`.
 
-(defun shuttle-stream (stream stream-name message)
-  "Read data from `stream` and shuttle it back to the client.
-
-  Chunks of data will be read from `stream` until it's finished and closed.
-
-  For each hunk of data read, a response will be sent back to the client using
-  the transport defined in `message`, looking something like:
-
-    {\"status\" \"ok\"
-     \"stdout\" \"...data...\"}
-
-  `stream-name` should be the name of the stream being shuttled, like
-  \"stderr\", and will be used as the key in the response.
+  Returns `(values nil nil)` once only whitespace and comments remain.
+  Signals an `evaluation-error` if the input is mangled.
 
   "
-  (loop
-    :for data = (read-data stream)
-    :until (and (not (open-stream-p stream))
-                (equal data ""))
-    :do (progn
-          (when (not (string= data ""))
-            (respond message (make-map "status" '("ok")
-                                       stream-name data)))
-          (sleep 0.1))))
-
-
-(defun get-forms (code)
-  "Get all lisp forms from `code`.
-
-  If `code` is a string, the forms will be read out of it, and an
-  `evaluation-error` signaled if the input is mangled.
-
-  If `code` is anything else it will just be returned as-is.
-
-  "
-  (if (stringp code)
+  (let ((eof (load-time-value (make-symbol "EOF"))))
     (handler-case
-        (read-all-from-string code)
+        (let ((form (read stream nil eof)))
+          (if (eq form eof)
+            (values nil nil)
+            (values form t)))
       (error (e)
-             (error 'evaluation-error
-                    :text "Malformed input!"
-                    :orig e)))
-    code))
+        (error 'evaluation-error
+               :text "Malformed input!"
+               :orig e)))))
+
+(defun safe-prin1 (object)
+  "Return `object` printed with `prin1`, without ever signaling."
+  (handler-case (prin1-to-string object)
+    (error (e)
+      (format nil "#<error printing object: ~A>" (safe-princ e)))))
 
 
 (defun parse-frame (frame)
@@ -88,67 +63,86 @@
 
 
 (defun nrepl-evaluate-form (form)
+  "Evaluate `form` and return a list of its values."
   (declare (optimize (debug 3)))
-  (prin1-to-string
-    (handler-bind
-      ((error
-         (lambda (err)
-           ; if we hit an error, get the stack trace before reraising.  if we
-           ; wait til later to print it, it'll be too late.
-           (error 'evaluation-error
-                  :text "Error during evaluation!"
-                  :orig err
-                  :data (let* ((raw (dissect:stack))
-                               (clean (parse-stack raw)))
-                          (setf *last-trace* raw)
-                          (list
-                            "form" (prin1-to-string form)
-                            "stack-trace" (string-trace-components clean)
-                            "stack-trace-string" (string-trace-whole clean)))))))
-      (dissect:with-truncated-stack ()
-        (eval form)))))
+  (handler-bind
+    ((error
+       (lambda (err)
+         ; if we hit an error, get the stack trace before reraising.  if we
+         ; wait til later to print it, it'll be too late.
+         (error 'evaluation-error
+                :text "Error during evaluation!"
+                :orig err
+                :data (let* ((raw (dissect:stack))
+                             (clean (parse-stack raw)))
+                        (setf *last-trace* raw)
+                        (list
+                          "form" (safe-prin1 form)
+                          "stack-trace" (string-trace-components clean)
+                          "stack-trace-string" (string-trace-whole clean)))))))
+    (dissect:with-truncated-stack ()
+      (multiple-value-list (eval form)))))
+
+(defun update-history (form values)
+  "Update the REPL history variables the way the standard REPL does."
+  (setf +++ ++ ++ + + form
+        /// // // / / values
+        *** ** ** * * (first values)))
 
 
-(defun evaluate-forms (message forms &optional in-package)
+(defun evaluate-forms (message forms &key in-package (echo-forms t))
   "Evaluate each form in `forms` and shuttle back the responses.
 
-  `forms` can be a string, in which case the forms will be read out of it, or
-  a ready-to-go list of actual forms.
+  `forms` can be a string, in which case the forms will be read out of it one
+  at a time (so an `in-package` affects how later forms are read), or a
+  ready-to-go list of actual forms.
 
-  `in-package` can be a package designator, or `nil` to just use `*package*`.
+  Evaluation happens in the current session, whose variables (like `*package*`)
+  are saved afterwards.  `in-package` can be a package designator to evaluate
+  in, or `nil` to use the session's package.
+
+  If `echo-forms` is true each value response includes the form that
+  produced it.
 
   "
-  (let* ((captured-out (flex:make-in-memory-output-stream))
-         (captured-err (flex:make-in-memory-output-stream))
-         (*standard-output*
-           (flex:make-flexi-stream captured-out :external-format :utf-8))
-         (*error-output*
-           (flex:make-flexi-stream captured-err :external-format :utf-8)))
-    (flet ((eval-form (form)
-             (let ((result (nrepl-evaluate-form form)))
+  (let* ((out (make-nrepl-output-stream message "stdout"))
+         (err (make-nrepl-output-stream message "stderr"))
+         (*standard-output* out)
+         (*error-output* err)
+         (*trace-output* out)
+         (*standard-input* (make-string-input-stream "")))
+    (labels ((flush ()
+               (finish-output out)
+               (finish-output err))
+             (eval-form (form)
+               (let ((values (nrepl-evaluate-form form)))
+                 (update-history form values)
+                 (flush)
+                 (respond message
+                          (with-when
+                              (make-map "value" (safe-prin1 (first values)))
+                            "form" (when echo-forms (safe-prin1 form))))))
+             (eval-all ()
+               (if (stringp forms)
+                 (with-input-from-string (stream forms)
+                   (loop (multiple-value-bind (form found)
+                             (read-next-form stream)
+                           (if found
+                             (eval-form form)
+                             (return)))))
+                 (mapc #'eval-form forms)))
+             (error-respond (e)
+               (flush)
                (respond message
-                        (make-map "form" (prin1-to-string form)
-                                  "value" result))))
-           (error-respond (e)
-             (respond message
-                      (apply #'make-map
-                             "status" '("error")
-                             "error" (text e)
-                             "original" (format nil "~S" (orig e))
-                             (data e))))
-           (make-shuttle-thread (stream desc)
-             (bt:make-thread
-               (lambda () (shuttle-stream stream desc message))
-               :name (format nil "NREPL ~A writer" desc))))
-      (unwind-protect
-          (progn
-            (make-shuttle-thread captured-out "stdout")
-            (make-shuttle-thread captured-err "stderr")
-            (handler-case
-                (progn
-                  (let ((*package* (parse-in-package in-package)))
-                    (mapc #'eval-form (get-forms forms)))
-                  (respond message (make-map "status" '("done"))))
-              (evaluation-error (e) (error-respond e))))
-        (close captured-out)
-        (close captured-err)))))
+                        (apply #'make-map
+                               "status" '("error")
+                               "error" (text e)
+                               "original" (safe-prin1 (orig e))
+                               (data e)))))
+      (with-session-bindings (*session*)
+        (when (and in-package (string/= in-package ""))
+          (setf *package* (parse-in-package in-package)))
+        (handler-case
+            (progn (eval-all)
+                   (respond message (make-map "status" '("done"))))
+          (evaluation-error (e) (error-respond e)))))))

@@ -8,14 +8,15 @@
       (write form))))
 
 (define-middleware wrap-macroexpand "macroexpand" message
-  ;; TODO: handle mangled input
-  (let* ((*package* (parse-in-package (fset:lookup message "in-package")))
-         (form (read-from-string (fset:lookup message "form"))))
-    (respond message
-             (make-map
-               "status" '("done")
-               "macroexpand" (pretty-string (macroexpand form))
-               "macroexpand-1" (pretty-string (macroexpand-1 form))))))
-
-
-
+  (let ((*package* (parse-in-package (fset:lookup message "in-package"))))
+    (multiple-value-bind (form readp)
+        (handler-case (values (read-from-string (fset:lookup message "form")) t)
+          (error () (values nil nil)))
+      (respond message
+               (if readp
+                 (make-map
+                   "status" '("done")
+                   "macroexpand" (pretty-string (macroexpand form))
+                   "macroexpand-1" (pretty-string (macroexpand-1 form)))
+                 (make-map "status" '("error")
+                           "error" "Malformed input!"))))))

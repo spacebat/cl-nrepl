@@ -1,33 +1,11 @@
 (in-package :nrepl)
 
-(defvar *sessions* (make-hash-table :test #'equal))
-(defvar *session* nil)
-
-
-(defun make-session ()
-  (fset:empty-map))
-
-(defun clear-sessions! ()
-  (clrhash *sessions*))
-
-(defun register-session! (id session)
-  (setf (gethash id *sessions*) session))
-
-(defun remove-session! (id)
-  (remhash id *sessions*))
-
-(defun get-session (id)
-  (gethash id *sessions*))
-
-(defun get-sessions ()
-  (hash-table-keys *sessions*))
-
-
 (defun wrap-session (handler)
   "Handle wrapping incoming messages in sessions.
 
   If a message contains a session key, look up that session in the list of
-  registered sessions and bind it into *session*.
+  registered sessions and bind it into *session*.  If there's no such session,
+  respond with an `unknown-session` error.
 
   If a message comes in without a session id, create a new session for it and
   patch the session id into the message before continuing on down the
@@ -42,10 +20,12 @@
     (let* ((session-id (fset:lookup message "session"))
            (session (if session-id
                       (get-session session-id)
-                      (make-session)))
-           (session-id (or session-id (random-uuid)))
-           (*session* session))
-      (funcall handler (fset:with message "session" session-id)))))
+                      (make-session))))
+      (if session
+        (let ((*session* session))
+          (funcall handler
+                   (fset:with message "session" (session-id session))))
+        (respond message (make-map "status" '("error" "unknown-session")))))))
 
 (define-middleware wrap-session-ls "ls-sessions" message
   (respond message
@@ -57,7 +37,7 @@
   (respond message (make-map "status" '("session-closed"))))
 
 (define-middleware wrap-session-clone "clone" message
-  (let ((new-id (register-session! (random-uuid)
-                                   (fset:lookup message "session"))))
-    (respond message (make-map "status" '("done") "new-session" new-id))))
-
+  (let ((new-session (make-session *session*)))
+    (register-session! new-session)
+    (respond message (make-map "status" '("done")
+                               "new-session" (session-id new-session)))))
