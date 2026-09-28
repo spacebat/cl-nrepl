@@ -8,7 +8,9 @@
       (write form))))
 
 (define-middleware wrap-macroexpand "macroexpand" message
-  (let ((*package* (parse-in-package (fset:lookup message "in-package"))))
+  "Returns the \"macroexpand\" and \"macroexpand-1\" of \"form\".  Optionally
+  takes \"ns\"."
+  (let ((*package* (message-package message)))
     (multiple-value-bind (form readp)
         (handler-case (values (read-from-string (fset:lookup message "form")) t)
           (error () (values nil nil)))
@@ -18,5 +20,5 @@
                    "status" '("done")
                    "macroexpand" (pretty-string (macroexpand form))
                    "macroexpand-1" (pretty-string (macroexpand-1 form)))
-                 (make-map "status" '("error")
+                 (make-map "status" '("done" "error")
                            "error" "Malformed input!"))))))

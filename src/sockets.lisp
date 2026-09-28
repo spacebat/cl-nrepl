@@ -2,10 +2,16 @@
 
 ;;;; In/out
 (defun write-object (socket-stream lock map)
-  "Bencode and write `map` to `socket-stream` while holding `lock`."
-  (bt:with-lock-held (lock)
-    (bencode:encode map socket-stream)
-    (force-output socket-stream)))
+  "Bencode and write `map` to `socket-stream` while holding `lock`.
+
+  Interrupts are deferred while writing: interrupting an evaluation partway
+  through a message would leave the connection with half a message on it.
+
+  "
+  (without-interrupts
+    (bt:with-lock-held (lock)
+      (bencode:encode map socket-stream)
+      (force-output socket-stream))))
 
 (defun read-object (socket-stream)
   "Read and bdecode a map from `socket-stream`."

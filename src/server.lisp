@@ -12,7 +12,8 @@
   Just returns a fallback response if no earlier middleware handled the message.
 
   "
-  (respond message (make-map "status" '("unknown-op"))))
+  (respond message (make-map "status" '("done" "unknown-op" "error")
+                             "op" (fset:lookup message "op"))))
 
 (defun middleware ()
   "Return the stack of middleware.
@@ -26,12 +27,16 @@
     'wrap-session-ls
     'wrap-session-clone
     'wrap-session-close
+    'wrap-interrupt
+    'wrap-stdin
     'wrap-describe
     'wrap-load-file
     'wrap-macroexpand
     'wrap-eval
     'wrap-documentation
     'wrap-arglist
+    'wrap-lookup
+    'wrap-completions
     ))
 
 (defun build-handler (base middleware)
@@ -50,19 +55,8 @@
   (funcall (build-handler #'handle-base (middleware)) message))
 
 (defun handle-message (message)
-  "Handle `message`, responding with an error instead of signaling one.
-
-  An error escaping here would take down the whole connection (or, with the
-  debugger enabled, hang it), so report it to the client instead.
-
-  "
-  (handler-case (handle message)
-    (serious-condition (c)
-      (log-message "~%; Error handling message: ~A~%" c)
-      (ignore-errors
-        (respond message
-                 (make-map "status" '("error")
-                           "error" (safe-princ c)))))))
+  "Handle `message`, responding with an error instead of signaling one."
+  (call-reporting-errors message (lambda () (handle message))))
 
 (defun handler (socket-stream lock)
   "Read a series of messages from `socket-stream`, handling each."

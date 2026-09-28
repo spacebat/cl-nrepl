@@ -7,12 +7,6 @@
    (orig :initarg :orig :reader orig)
    (data :initarg :data :reader data :initform ())))
 
-(defclass evaluator ()
-  ((standard-input :initarg :in :reader in)
-   (standard-output :initarg :out :reader out)
-   (standard-error :initarg :err :reader err)))
-
-
 (defun read-next-form (stream)
   "Read the next form from `stream`, returning `(values form t)`.
 
@@ -89,39 +83,70 @@
         /// // // / / values
         *** ** ** * * (first values)))
 
+(defun print-values (values)
+  "Print `values` for a \"value\" response: one per line, like the REPL."
+  (if values
+    (format nil "~{~A~^~%~}" (mapcar #'safe-prin1 values))
+    "; No values"))
 
-(defun evaluate-forms (message forms &key in-package (echo-forms t))
-  "Evaluate each form in `forms` and shuttle back the responses.
+
+(defun report-evaluation-error (message e out err)
+  "Report the `evaluation-error` `e` the way nREPL does: a description on
+  stderr, then an `eval-error` status naming the condition's type."
+  (let ((condition (orig e)))
+    (format err "~A~@[ (~A)~]:~%~A~%"
+            (text e)
+            (when condition (qualified-name (type-of condition)))
+            (if condition (safe-princ condition) ""))
+    (finish-output out)
+    (finish-output err)
+    (let ((type (qualified-name (type-of (or condition e)))))
+      (respond message
+               (apply #'make-map
+                      "status" '("eval-error")
+                      "ex" type
+                      "root-ex" type
+                      (data e))))))
+
+(defun evaluate-forms (message forms &key ns)
+  "Evaluate each form in `forms` and send back the responses.
 
   `forms` can be a string, in which case the forms will be read out of it one
   at a time (so an `in-package` affects how later forms are read), or a
   ready-to-go list of actual forms.
 
   Evaluation happens in the current session, whose variables (like `*package*`)
-  are saved afterwards.  `in-package` can be a package designator to evaluate
-  in, or `nil` to use the session's package.
+  are saved afterwards.  `ns` can name a package to evaluate in, or be `nil` to
+  use the session's package.
 
-  If `echo-forms` is true each value response includes the form that
-  produced it.
+  Responses follow nREPL: output as \"out\"/\"err\", a \"value\" and \"ns\"
+  for each form, an \"eval-error\" status (with \"ex\") for each form that
+  signals an error, and finally a \"done\" status.  As in nREPL, an error
+  reading the code stops evaluation but an error evaluating a form doesn't.
 
   "
-  (let* ((out (make-nrepl-output-stream message "stdout"))
-         (err (make-nrepl-output-stream message "stderr"))
+  (let* ((session *session*)
+         (out (make-nrepl-output-stream message "out"))
+         (err (make-nrepl-output-stream message "err"))
+         (in (or (session-input session) (make-string-input-stream "")))
          (*standard-output* out)
          (*error-output* err)
          (*trace-output* out)
-         (*standard-input* (make-string-input-stream "")))
+         (*standard-input* in)
+         (*query-io* (make-two-way-stream in out)))
     (labels ((flush ()
                (finish-output out)
                (finish-output err))
              (eval-form (form)
-               (let ((values (nrepl-evaluate-form form)))
-                 (update-history form values)
-                 (flush)
-                 (respond message
-                          (with-when
-                              (make-map "value" (safe-prin1 (first values)))
-                            "form" (when echo-forms (safe-prin1 form))))))
+               (handler-case
+                   (let ((values (nrepl-evaluate-form form)))
+                     (update-history form values)
+                     (flush)
+                     (respond message
+                              (make-map "value" (print-values values)
+                                        "ns" (package-name *package*))))
+                 (evaluation-error (e)
+                   (report-evaluation-error message e out err))))
              (eval-all ()
                (if (stringp forms)
                  (with-input-from-string (stream forms)
@@ -130,19 +155,18 @@
                            (if found
                              (eval-form form)
                              (return)))))
-                 (mapc #'eval-form forms)))
-             (error-respond (e)
-               (flush)
-               (respond message
-                        (apply #'make-map
-                               "status" '("error")
-                               "error" (text e)
-                               "original" (safe-prin1 (orig e))
-                               (data e)))))
-      (with-session-bindings (*session*)
-        (when (and in-package (string/= in-package ""))
-          (setf *package* (parse-in-package in-package)))
-        (handler-case
-            (progn (eval-all)
-                   (respond message (make-map "status" '("done"))))
-          (evaluation-error (e) (error-respond e)))))))
+                 (mapc #'eval-form forms))))
+      (with-session-bindings (session)
+        (when ns
+          (setf *package* (parse-in-package ns)))
+        (let ((result (with-interruptible-evaluation (session message)
+                        (handler-case (progn (eval-all) nil)
+                          ;; Only reading can signal this here: eval-form
+                          ;; handles its own.
+                          (evaluation-error (e)
+                            (report-evaluation-error message e out err))))))
+          (flush)
+          (respond message
+                   (make-map "status" (if (eq result :interrupted)
+                                        '("done" "interrupted")
+                                        '("done")))))))))

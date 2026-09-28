@@ -6,11 +6,11 @@
 (defvar *timeout* 5)
 (defvar *message-id* 0)
 
-(defparameter *terminal-statuses*
-  '("done" "error" "session-closed" "unknown-op" "unknown-session"))
-
 (defstruct (connection (:constructor %make-connection))
-  socket stream)
+  socket
+  stream
+  ;; Responses read while waiting for something else, oldest first.
+  (inbox nil))
 
 (defun connect (&optional (port *port*))
   (let ((socket (usocket:socket-connect "127.0.0.1" port
@@ -59,25 +59,50 @@
   (wait-for-response connection)
   (bencode:decode (connection-stream connection)))
 
-(defun terminal-p (response)
-  (intersection (gethash "status" response) *terminal-statuses*
-                :test #'equal))
+(defun has-status-p (status response)
+  (member status (gethash "status" response) :test #'equal))
 
-(defun send (connection &rest keyvals)
-  "Send a message built from `keyvals` and return the list of responses to it.
-
-  Responses are collected until one carries a terminal status.
-
-  "
+(defun send-message (connection &rest keyvals)
+  "Send a message built from `keyvals` without waiting.  Returns its id."
   (let ((id (format nil "~D" (incf *message-id*)))
         (stream (connection-stream connection)))
     (bencode:encode (apply #'make-message "id" id keyvals) stream)
     (force-output stream)
-    (loop :for response = (read-response connection)
-          :when (equal id (gethash "id" response))
-            :collect response :into responses
-            :and :do (when (terminal-p response)
-                       (return responses)))))
+    id))
+
+(defun next-response (connection id)
+  "Return the next response to the message with `id`.
+
+  Responses to other messages that arrive in the meantime are kept for later.
+
+  "
+  (let ((stashed (find id (connection-inbox connection)
+                       :key (lambda (r) (gethash "id" r)) :test #'equal)))
+    (if stashed
+      (progn (setf (connection-inbox connection)
+                   (remove stashed (connection-inbox connection) :count 1))
+             stashed)
+      (loop :for response = (read-response connection)
+            :if (equal id (gethash "id" response))
+              :return response
+            :else
+              :do (setf (connection-inbox connection)
+                        (append (connection-inbox connection)
+                                (list response)))))))
+
+(defun responses-until (connection id status)
+  "Return the responses to message `id` up to and including one with `status`."
+  (loop :for response = (next-response connection id)
+        :collect response
+        :until (has-status-p status response)))
+
+(defun responses (connection id)
+  "Return all the responses to message `id`, up to its \"done\"."
+  (responses-until connection id "done"))
+
+(defun send (connection &rest keyvals)
+  "Send a message built from `keyvals` and return the list of responses to it."
+  (responses connection (apply #'send-message connection keyvals)))
 
 
 ;;;; Response helpers

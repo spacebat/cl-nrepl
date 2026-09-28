@@ -46,6 +46,47 @@
              "session" (fset:lookup message "session"))))
 
 
+(defun call-reporting-errors (message thunk)
+  "Call `thunk`, responding to `message` with an error instead of signaling.
+
+  An error escaping from a message handler would take down the thread handling
+  it (or, with the debugger enabled, hang it), so report it to the client.
+
+  "
+  (handler-case (funcall thunk)
+    (serious-condition (c)
+      (log-message "~%; Error handling message: ~A~%" c)
+      (ignore-errors
+        (respond message
+                 (make-map "status" '("done" "error")
+                           "error" (safe-princ c)))))))
+
+
+(defmacro without-interrupts (&body body)
+  "Run `body` with interrupts from `bt:interrupt-thread` deferred, if the
+  implementation supports it."
+  #+sbcl `(sb-sys:without-interrupts ,@body)
+  #+ccl `(ccl:without-interrupts ,@body)
+  #-(or sbcl ccl) `(progn ,@body))
+
+
+(defun lisp-name (string)
+  "Return `string` (a symbol or package name) the way a user would type it.
+
+  Names with no lowercase characters are downcased, since the reader upcases
+  what's typed.  Anything else is left as-is.
+
+  "
+  (if (string= string (string-upcase string))
+    (string-downcase string)
+    string))
+
+(defun qualified-name (symbol)
+  "Return the fully package-qualified name of `symbol` as a string."
+  (let ((*package* (find-package :keyword)))
+    (prin1-to-string symbol)))
+
+
 (defmacro when-found ((var lookup-expr) &body body)
   "Perform `body` with `var` bound to the results of `lookup-expr`, when valid.
 
